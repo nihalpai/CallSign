@@ -1,0 +1,10 @@
+{
+  "alert_id": "dd-2026-0042",
+  "title": "Remote code execution attempt detected",
+  "alert_type": "security",
+  "priority": "P1",
+  "tags": ["cve:CVE-2026-1337", "service:auth", "host:auth-01"],
+  "body": "Anomalous bash process spawned via CGI on auth-01. Pattern matches Shellshock-class RCE.",
+  "host": "auth-01",
+  "timestamp": "2026-06-15T09:14:00Z"
+}

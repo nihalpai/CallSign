@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+sse-starlette
+pydantic
+python-dotenv
+httpx
+lyzr-automata
