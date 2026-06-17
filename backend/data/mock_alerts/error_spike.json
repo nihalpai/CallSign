@@ -1,0 +1,11 @@
+{
+  "alert_id": "dd-2026-0112",
+  "title": "Error rate spike on authentication service",
+  "alert_type": "reliability",
+  "priority": "P2",
+  "tags": ["service:auth-01", "host:auth-01", "route:/api/login"],
+  "body": "Error rate on /api/login climbed to 25% over the past 10 minutes. No recent deploy detected.",
+  "host": "auth-01",
+  "timestamp": "2026-06-15T10:30:00Z",
+  "sim_resolves_after": "restart_service"
+}

@@ -25,6 +25,25 @@ def test_set_status_unknown_server_is_noop():
     assert all(s["status"] == "healthy" for s in state.get_state()["servers"])
 
 
+def test_set_status_all_v2_enum_values():
+    for status in ("healthy", "compromised", "isolated", "degraded", "rolled_back", "recovered"):
+        state._load()  # reset between iterations
+        state.set_status("payment-gw", status)
+        servers = {s["id"]: s["status"] for s in state.get_state()["servers"]}
+        assert servers["payment-gw"] == status
+
+
+def test_get_server_returns_dict():
+    server = state.get_server("auth-01")
+
+    assert server is not None
+    assert server["id"] == "auth-01"
+
+
+def test_get_server_unknown_returns_none():
+    assert state.get_server("ghost-99") is None
+
+
 def test_blast_radius_follows_dependents_transitively():
     # payment-gw and web-01 directly depend on auth-01; web-01 also via payment-gw.
     assert state.blast_radius("auth-01") == ["payment-gw", "web-01"]
