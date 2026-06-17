@@ -277,7 +277,7 @@ def test_stream_first_event_is_state_snapshot():
     async def first_event() -> dict:
         gen = event_stream()
         try:
-            return await anext(gen)
+            return await gen.__anext__()
         finally:
             await gen.aclose()
 
@@ -295,8 +295,8 @@ def test_stream_forwards_published_events():
     async def second_event() -> dict:
         gen = event_stream()
         try:
-            await anext(gen)  # consume initial state; generator now subscribes
-            pending = asyncio.ensure_future(anext(gen))
+            await gen.__anext__()  # consume initial state; generator now subscribes
+            pending = asyncio.ensure_future(gen.__anext__())
             await asyncio.sleep(0.05)  # let the generator reach q.get()
             emit_log("AGENT", "cross-referencing runbook")
             return await pending

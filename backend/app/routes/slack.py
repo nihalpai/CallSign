@@ -11,7 +11,7 @@ import hmac
 import json
 import time
 import urllib.parse
-from typing import Annotated
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from app.config import SLACK_INTERACTIVE, SLACK_SIGNING_SECRET
@@ -51,8 +51,8 @@ def _verify_slack_signature(
 @router.post("/slack/interactions")
 async def slack_interactions(
     request: Request,
-    x_slack_request_timestamp: Annotated[str | None, Header()] = None,
-    x_slack_signature: Annotated[str | None, Header()] = None,
+    x_slack_request_timestamp: Annotated[Optional[str], Header()] = None,
+    x_slack_signature: Annotated[Optional[str], Header()] = None,
 ) -> dict:
     if not SLACK_INTERACTIVE:
         raise HTTPException(status_code=404, detail="Slack interactions not enabled")

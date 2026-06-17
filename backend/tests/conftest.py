@@ -1,6 +1,7 @@
 """Shared fixtures. The backend holds in-memory state at module scope, so every
 test resets it to a clean slate to stay order-independent."""
 from __future__ import annotations
+import asyncio
 import json
 from pathlib import Path
 
@@ -11,6 +12,16 @@ from app import state, incidents, events, deployments
 from app.main import app
 
 ALERT_PATH = Path(__file__).resolve().parent.parent / "data" / "mock_alerts" / "shellshock.json"
+
+
+@pytest.fixture(autouse=True)
+def reset_event_loop():
+    """Ensure each test gets a fresh, open event loop (Python 3.9 compatibility).
+    asyncio.run() closes the default loop; subsequent asyncio.Queue() calls fail."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    yield loop
+    loop.close()
 
 
 @pytest.fixture(autouse=True)
