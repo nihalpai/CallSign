@@ -1,73 +1,159 @@
-# Voice (Lyzr Studio)
+# Voice / Escalation Agent (Lyzr Studio)
 
-> Scope: turning the Commander script into a spoken approval conversation. Voice is a
-> **swappable approval channel** (see [architecture.md](architecture.md)); it is added
-> *after* the button-approval loop works. The brain/state/UI don't change when voice is
-> wired in.
+> Scope: the escalation agent that delivers the Strategist's `script`
+> ([data-contracts.md](data-contracts.md) §4) to the on-call engineer and captures their
+> approve/deny decision. Currently configured as a **text agent** (voice premium not yet
+> active). Slack is the primary approval channel while voice is unavailable —
+> see [slack.md](slack.md). The agent, tool, and `/execute` contract are identical across
+> all tiers; upgrading to voice is a Studio toggle, not a code change.
 
-## The three tiers
+> **All three agents live in one Lyzr Studio account** — the two brain agents
+> ([agents.md](agents.md), called via the Agent API) and this agent share the same
+> `LYZR_API_KEY`. Referenced by `LYZR_VOICE_AGENT_ID`.
 
-| Tier | Channel | Needs | Status |
-|------|---------|-------|--------|
-| **0** | UI button → POST `/execute` | nothing | build first (Phase 3) |
-| **1** | Lyzr Studio voice agent, browser mic/speaker → tool → `/execute` | Lyzr Studio (have it) | Phase 5 |
-| **2** | Real outbound phone call | Twilio + Deepgram/ElevenLabs | future, optional |
+## Approval channel tiers
 
-All tiers converge on the **same** `POST /execute` (data-contracts §6). That is the whole
-point — nothing downstream knows which tier fired.
+| Tier | Channel | Status |
+|------|---------|--------|
+| **0** | UI button → `/execute` | ✅ built |
+| **1** | Slack DM — incident card with Approve/Deny buttons → `/execute` | ✅ active (primary) |
+| **2** | Lyzr Studio text agent → `resolve_incident` tool → `/execute` | ✅ configured, pending voice premium |
+| **3** | Lyzr Studio voice agent (browser mic) → `resolve_incident` → `/execute` | future — enable when voice premium available |
+| **4** | Real outbound phone call (Twilio + Deepgram/ElevenLabs) | future |
 
-## Tier 1 — Lyzr Studio voice agent (the target for the demo)
+All tiers POST the **same** `/execute` (§6). Nothing downstream knows which tier fired.
 
-### Configuration
-- **Behavior:** *Agent Speaks First* — it opens with the script, doesn't wait for the
-  human to talk.
-- **Latency:** select Lyzr's lowest-latency / realtime engine. Emergency tool → snappy
-  turn-taking matters more than perfect prosody.
-- **STT/TTS:** use whatever Lyzr Studio provides out of the box for the PoC. Deepgram /
-  ElevenLabs keys are a *future* quality upgrade, not a dependency.
+---
 
-### The custom tool: `isolate_container`
-Define a tool in Lyzr Studio that fires when the human approves. It performs:
+## Tier 2 — Lyzr Studio text agent (current configuration)
+
+Configured as a standard text agent. When voice premium is enabled, the only change is
+toggling the Voice Agent feature on in Studio — the role, goal, instructions, and tool
+stay identical.
+
+### Studio configuration
+
+**Name:** `CallSign Voice`
+
+**Description:**
+`Emergency incident response agent that delivers a pre-written incident script to the on-call engineer and captures their approve or deny decision.`
+
+**Model:** `gpt-4o` (or the most capable model on your plan — this agent must follow instructions precisely)
+
+**Agent Role:**
+`You are an emergency incident response agent that delivers a pre-written script to an on-call engineer and captures their approval decision.`
+
+**Agent Goal:**
+`Present the incident script exactly as provided, capture a clear yes or no from the engineer, and call the resolve_incident tool with their decision.`
+
+**Agent Instructions:**
 ```
-POST {PUBLIC_BACKEND_URL}/execute
-{ "incident_id": "...", "decision": "approve", "action": "isolate_container", "target": "auth-01" }
+You are operating in an emergency incident response scenario. An incident is active and you have been given a script to deliver to the on-call engineer.
+
+OPENING:
+- Do not wait for the engineer to initiate. Immediately present the script field from your context exactly as written. Do not paraphrase or summarise it.
+- The script is at most 3 sentences and ends in a yes/no question. Deliver it verbatim.
+
+CAPTURING THE DECISION:
+- After presenting the script, wait for the engineer's response.
+- Accept "yes", "approve", "go ahead", "do it", "confirm" as an APPROVE decision.
+- Accept "no", "deny", "stop", "don't", "hold off", "cancel" as a DENY decision.
+- If the response is ambiguous, ask once: "Just to confirm — do you approve the action, yes or no?"
+- After one clarification attempt, if still ambiguous, treat it as DENY and log it.
+
+CALLING THE TOOL:
+- Once you have a clear decision, immediately call the resolve_incident tool with:
+    - incident_id: from your context
+    - decision: "approve" or "deny"
+    - action: from your context
+    - target: from your context
+    - actor: "voice"
+- Do not describe what the tool does. Confirm to the engineer: "Got it. I've logged your decision."
+
+OUT-OF-SCOPE QUESTIONS:
+- If the engineer asks anything outside of approving or denying this specific action, say exactly:
+  "I don't have that context right now. Please use the CallSign UI or Slack to respond."
+  Do not improvise, explain the system, or discuss other incidents.
+
+AFTER THE TOOL CALL:
+- Say: "Thank you. The team has been notified." Then end the conversation.
+- Do not continue after the tool call completes.
+
+TONE: Direct, calm, professional. This is an emergency channel — be clear and brief, not warm or chatty.
 ```
-- The tool needs the live `incident_id`, `action`, `target`. These come from how the
-  script is injected (below).
-- Also define the deny path (decision `deny`) or let the agent end the call without
-  calling the tool (then a timeout/explicit deny resolves the incident).
 
-### Getting the per-incident script into the voice agent — OPEN RISK
-The dynamic-script idea depends on Lyzr letting us set per-call context at trigger time.
-**Confirm which of these Lyzr Studio supports before building Phase 5:**
-1. **Per-call system-prompt / context injection** at session start (ideal: pass the
-   Commander `script`, `incident_id`, `action`, `target`).
-2. **Input variables / metadata** passed into the session that the agent and tool can read.
-3. If neither: the agent fetches its own context — backend exposes
-   `GET /incident/{id}` and the voice agent's opening step calls it.
+**Knowledge Base / Memory / all other features:** Off.
 
-Pick the first one Lyzr actually supports. This is the single biggest integration unknown
-— resolve it early.
+### The custom tool: `resolve_incident`
 
-### Reachability — backend must be public
-Lyzr's cloud calls the tool, so it can't reach `localhost`. Expose the local backend:
+Add this as an HTTP tool on the agent in Studio:
+
 ```
-ngrok http 8000      # free tier; use the https URL as PUBLIC_BACKEND_URL
+Tool name:    resolve_incident
+Description: Call this when the engineer has given a clear approve or deny decision.
+             Posts the decision to the CallSign backend and completes the incident
+             approval loop.
+Method:       POST
+URL:          {PUBLIC_BACKEND_URL}/execute
+Headers:      Content-Type: application/json
+Body (JSON):
+  {
+    "incident_id": "<from context>",
+    "decision":    "approve|deny",
+    "action":      "<from context>",
+    "target":      "<from context>",
+    "actor":       "voice"
+  }
 ```
-Update the tool URL and CORS (backend.md) with the ngrok origin.
 
-### Voice-agent guardrails (Phase 6)
-- **Fallback line:** if asked something out of scope →
-  *"I do not have that context. Escalating to tier 2."* Configure as the agent's
-  unknown-question behavior; do not let it improvise security advice.
-- Keep it on-script: its only job is to read the script and capture a yes/no.
+| Parameter | Source |
+|---|---|
+| `incident_id` | injected at call-time |
+| `decision` | captured from the engineer's response |
+| `action` | injected at call-time |
+| `target` | injected at call-time |
+| `actor` | always the literal string `"voice"` |
 
-## Tier 2 — real phone call (future)
-When telephony is in budget: front the same Lyzr voice agent with Twilio (outbound dial
-to your cell), and swap Lyzr's built-in STT/TTS for Deepgram + ElevenLabs for quality.
-**No backend changes** — still the same `isolate_container` → `/execute`. This is the
-"hold the phone to the mic" moment from the demo script (Plan.MD Phase 7).
+### Per-incident context injection — OPEN RISK
 
-## Demo note
-Tier 1 already *sounds* like the phone demo (a voice reads the script, you say "yes,
-isolate it," the UI flips). Record with Tier 1 if Tier 2 isn't ready — it loses little.
+The agent needs `script`, `incident_id`, `action`, and `target` at conversation start.
+Confirm one of these with Lyzr Studio before activating Tier 2:
+
+1. **Per-call system-prompt injection** (ideal): pass the four fields when triggering the agent via the API.
+2. **Input variables / metadata**: injected into the tool call at trigger time.
+3. **Fallback**: agent's first turn calls `GET /incident/{id}` to fetch its own context.
+
+### Reachability
+
+The `resolve_incident` tool calls your backend, so it must be publicly reachable:
+```bash
+ngrok http 8000
+```
+Set `PUBLIC_BACKEND_URL` in `.env` to the ngrok URL.
+
+---
+
+## Current active config (`.env`)
+
+```
+VOICE_ENABLED=false        # Tier 2/3 agent call not yet triggered by escalation
+LYZR_VOICE_AGENT_ID=       # paste from Studio — agent exists but escalation won't call it yet
+```
+
+`VOICE_ENABLED=false` means `escalation.py` skips the voice fan-out and only fires Slack.
+The agent in Studio is fully configured and can be tested manually. Set `VOICE_ENABLED=true`
+once per-call context injection is confirmed working.
+
+---
+
+## Upgrading to Tier 3 (voice)
+
+When voice premium is available in Studio:
+1. Enable the **Voice Agent** feature on the `CallSign Voice` agent in Studio.
+2. Set **Agent Speaks First: ON**.
+3. No backend, tool, or instruction changes needed.
+
+## Upgrading to Tier 4 (real phone call)
+
+Front the same agent with Twilio (outbound dial to `engineer.phone`) and swap in
+Deepgram + ElevenLabs. No backend changes — still `resolve_incident` → `/execute`.

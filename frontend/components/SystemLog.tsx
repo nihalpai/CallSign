@@ -7,10 +7,22 @@ interface Props {
   logs: LogEvent[];
 }
 
+// source → Tailwind color class. SYSTEM dim, AGENT cyan, REMEDIATION violet, SLACK green, VOICE amber.
 const SOURCE_CLASS: Record<string, string> = {
-  SYSTEM: "text-zinc-400",
-  AGENT: "text-cyan-400",
-  VOICE: "text-amber-400",
+  SYSTEM:      "text-zinc-500",
+  AGENT:       "text-cyan-400",
+  REMEDIATION: "text-violet-400",
+  SLACK:       "text-green-400",
+  VOICE:       "text-amber-400",
+};
+
+// Fixed-width label per source so columns stay aligned.
+const SOURCE_LABEL: Record<string, string> = {
+  SYSTEM:      "SYSTEM     ",
+  AGENT:       "AGENT      ",
+  REMEDIATION: "REMEDIATION",
+  SLACK:       "SLACK      ",
+  VOICE:       "VOICE      ",
 };
 
 function formatTs(ts: string): string {
@@ -36,6 +48,9 @@ export default function SystemLog({ logs }: Props) {
         <span className="text-xs font-mono text-zinc-400 tracking-widest uppercase">
           System Log
         </span>
+        <span className="ml-auto text-[10px] font-mono text-zinc-600">
+          {logs.length} events
+        </span>
       </div>
 
       {/* log body */}
@@ -47,13 +62,14 @@ export default function SystemLog({ logs }: Props) {
         )}
         {logs.map((log, i) => (
           <div key={i} className="flex gap-3 items-start font-mono text-sm leading-relaxed">
-            <span className="text-zinc-600 shrink-0 tabular-nums text-xs pt-0.5">
+            <span className="text-zinc-600 shrink-0 tabular-nums text-xs pt-0.5 select-none">
               {formatTs(log.ts)}
             </span>
             <span
-              className={`shrink-0 text-xs font-bold pt-0.5 w-12 ${SOURCE_CLASS[log.source] ?? "text-zinc-300"}`}
+              className={`shrink-0 text-xs font-bold pt-0.5 ${SOURCE_CLASS[log.source] ?? "text-zinc-300"}`}
+              style={{ minWidth: "7.5rem" }}
             >
-              [{log.source}]
+              [{SOURCE_LABEL[log.source] ?? log.source}]
             </span>
             <span className="text-zinc-200 break-words">{log.message}</span>
           </div>

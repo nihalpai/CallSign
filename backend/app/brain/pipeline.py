@@ -1,80 +1,66 @@
 """
-Brain pipeline — public entry point for the backend.
+Brain pipeline — public entry point.
 
-run_brain(alert, log) -> (forensic, commander)
+run_brain(alert, log) -> (diagnosis, plan)
 
-Selects the Lyzr Automata path when LYZR_API_KEY is set and the SDK is installed;
-falls back to the deterministic local implementation otherwise.
+Runs diagnostician → strategist. On any exception falls back to the full
+deterministic engine and emits a [SYSTEM] warning via log.
 """
+from __future__ import annotations
 
-import logging
-import os
 from typing import Callable
 
-_log = logging.getLogger(__name__)
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def run_brain(
     alert: dict,
     log: Callable[[str, str], None],
+    session_id: str | None = None,
 ) -> tuple[dict, dict]:
     """
     Orchestrate the two-agent pipeline.
 
     Args:
-        alert:  Raw alert dict matching data-contracts §1.
-        log:    Callback with signature (source: str, message: str).
-                Each call becomes a "AGENT" SSE log event.
+        alert: Raw alert dict matching data-contracts §1.
+        log:   Callback (source: str, message: str) → each call becomes an SSE log.
 
     Returns:
-        (forensic, commander) matching data-contracts §3 and §4.
+        (diagnosis, plan) matching data-contracts §3 and §4.
     """
-    log("AGENT", f"Parsing alert {alert.get('alert_id', '?')} — priority {alert.get('priority', '?')}")
+    if session_id is None:
+        import uuid
+        session_id = f"{alert.get('alert_id', 'inc')}-{uuid.uuid4().hex[:8]}"
 
-    api_key: str | None = os.getenv("LYZR_API_KEY")
+    log("AGENT", f"Diagnosing alert {alert.get('alert_id', '?')} — priority {alert.get('priority', '?')}")
 
-    if api_key:
-        try:
-            forensic, commander = _run_lyzr(alert, log)
-            log(
-                "AGENT",
-                f"Matched runbook {forensic['runbook']}; "
-                f"recommending {forensic['recommended_action']} on {forensic['action_target']}",
-            )
-            log("AGENT", "Drafted approval script.")
-            return forensic, commander
-        except Exception as exc:
-            _log.warning("Lyzr path failed (%s) — falling back to deterministic engine.", exc)
-            log("AGENT", f"[WARN] Lyzr agent error ({type(exc).__name__}) — switching to fallback.")
+    try:
+        from app.brain.diagnostician import diagnostician
+        from app.brain.strategist import strategist
 
-    # Deterministic fallback (no network, always works)
-    from .fallback import run_fallback
+        diagnosis = diagnostician(alert, log, session_id)
+        log(
+            "AGENT",
+            f"{diagnosis['incident_type']} on {diagnosis['affected_service']} "
+            f"@ {diagnosis['exact_location'].get('route', '/')}; runbook {diagnosis['runbook']}",
+        )
 
-    forensic, commander = run_fallback(alert, log)
-    log(
-        "AGENT",
-        f"Matched runbook {forensic['runbook']}; "
-        f"recommending {forensic['recommended_action']} on {forensic['action_target']}",
-    )
-    log("AGENT", "Drafted approval script.")
-    return forensic, commander
+        plan = strategist(diagnosis, log, session_id)
+        log("AGENT", f"Planned {len(plan['steps'])} step(s); first = {plan['steps'][0]['action']}.")
 
+        return diagnosis, plan
 
-# ---------------------------------------------------------------------------
-# Lyzr Automata path (imported lazily — missing SDK never breaks fallback)
-# ---------------------------------------------------------------------------
+    except Exception as exc:
+        logger.exception("Brain pipeline failed — engaging full deterministic fallback")
+        log("AGENT", f"[SYSTEM] Brain error ({type(exc).__name__}) — switching to deterministic fallback.")
 
-def _run_lyzr(
-    alert: dict,
-    log: Callable[[str, str], None],
-) -> tuple[dict, dict]:
-    """
-    Runs the two-agent Lyzr pipeline.  Any exception propagates to run_brain,
-    which then activates the fallback.
-    """
-    from .forensic import run_forensic
-    from .commander import run_commander
-
-    forensic = run_forensic(alert, log)
-    commander = run_commander(forensic, log)
-    return forensic, commander
+        from app.brain.fallback import run_fallback
+        diagnosis, plan = run_fallback(alert, log)
+        log(
+            "AGENT",
+            f"[Fallback] {diagnosis['incident_type']} on {diagnosis['affected_service']}; "
+            f"runbook {diagnosis['runbook']}",
+        )
+        return diagnosis, plan

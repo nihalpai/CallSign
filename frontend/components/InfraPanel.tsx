@@ -8,15 +8,36 @@ interface Props {
   incident: Incident | null;
 }
 
-export default function InfraPanel({ servers, incident }: Props) {
-  // blast radius = depended_on_by of the targeted server
-  const blastRadiusIds = new Set<string>();
-  if (incident) {
-    const targetServer = servers.find((s) => s.id === incident.target);
-    if (targetServer) {
-      targetServer.depended_on_by.forEach((id) => blastRadiusIds.add(id));
-    }
+function deriveBlastRadius(servers: Server[], incident: Incident | null): Set<string> {
+  const ids = new Set<string>();
+  if (!incident?.diagnosis) return ids;
+
+  // Use blast_radius from diagnosis if available
+  const diagnosisRadius = incident.diagnosis.blast_radius ?? [];
+  diagnosisRadius.forEach((id) => ids.add(id));
+
+  // Also add depended_on_by of the affected service as fallback
+  const affectedId = incident.diagnosis.affected_service;
+  const affectedServer = servers.find((s) => s.id === affectedId);
+  if (affectedServer) {
+    affectedServer.depended_on_by.forEach((id) => ids.add(id));
   }
+
+  return ids;
+}
+
+const INCIDENT_OPEN_STATUSES = new Set([
+  "received",
+  "diagnosing",
+  "remediating",
+  "verifying",
+  "escalated",
+  "awaiting_approval",
+]);
+
+export default function InfraPanel({ servers, incident }: Props) {
+  const incidentOpen = incident ? INCIDENT_OPEN_STATUSES.has(incident.status) : false;
+  const blastRadiusIds = incidentOpen ? deriveBlastRadius(servers, incident) : new Set<string>();
 
   return (
     <div className="flex flex-col h-full">

@@ -35,6 +35,15 @@ def test_emit_log_has_source_message_and_timestamp():
     assert evt["data"]["ts"]  # ISO timestamp present
 
 
+def test_emit_log_remediation_source():
+    q = events.subscribe()
+
+    events.emit_log("REMEDIATION", "rolling back payment-gw")
+
+    evt = q.get_nowait()
+    assert evt["data"]["source"] == "REMEDIATION"
+
+
 def test_emit_state_carries_current_servers():
     q = events.subscribe()
 
@@ -44,3 +53,14 @@ def test_emit_state_carries_current_servers():
     assert evt["type"] == "state"
     auth = next(s for s in evt["data"]["servers"] if s["id"] == "auth-01")
     assert auth["status"] == "isolated"
+
+
+def test_emit_state_carries_degraded_status():
+    q = events.subscribe()
+
+    state.set_status("payment-gw", "degraded")
+
+    evt = q.get_nowait()
+    assert evt["type"] == "state"
+    pgw = next(s for s in evt["data"]["servers"] if s["id"] == "payment-gw")
+    assert pgw["status"] == "degraded"

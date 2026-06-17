@@ -1,0 +1,11 @@
+{
+  "alert_id": "dd-2026-0099",
+  "title": "5xx error rate spike on checkout",
+  "alert_type": "reliability",
+  "priority": "P1",
+  "tags": ["service:payment-gw", "host:payment-gw", "route:/api/checkout", "deploy:dpl_9f2"],
+  "body": "HTTP 5xx on /api/checkout jumped to 40% immediately after deploy dpl_9f2.",
+  "host": "payment-gw",
+  "timestamp": "2026-06-15T09:14:00Z",
+  "sim_resolves_after": "restart_service"
+}

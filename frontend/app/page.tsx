@@ -5,9 +5,10 @@ import { LogEvent, Server, Incident } from "@/lib/types";
 import SystemLog from "@/components/SystemLog";
 import InfraPanel from "@/components/InfraPanel";
 import TriggerBar from "@/components/TriggerBar";
+import ModeBanner from "@/components/ModeBanner";
+import IncidentDetail from "@/components/IncidentDetail";
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export default function Page() {
   const [logs, setLogs] = useState<LogEvent[]>([]);
@@ -29,17 +30,19 @@ export default function Page() {
     esRef.current = es;
 
     es.onopen = () => setSseStatus("connected");
-    es.onerror = () => setSseStatus("error");
+    es.onerror = (e) => {
+      setSseStatus("error");
+      console.error("[SSE] EventSource error", e);
+    };
 
     // Named SSE events per data-contracts §7
     es.addEventListener("log", (e: MessageEvent) => {
       try {
         const payload = JSON.parse(e.data);
-        // payload may be the raw LogEvent or wrapped { type, data }
         const logEntry: LogEvent = payload.data ?? payload;
         appendLog(logEntry);
-      } catch {
-        // ignore malformed frames
+      } catch (err) {
+        console.error("[SSE] Failed to parse log event", err, e.data);
       }
     });
 
@@ -48,8 +51,8 @@ export default function Page() {
         const payload = JSON.parse(e.data);
         const stateData = payload.data ?? payload;
         setServers(stateData.servers ?? []);
-      } catch {
-        // ignore malformed frames
+      } catch (err) {
+        console.error("[SSE] Failed to parse state event", err, e.data);
       }
     });
 
@@ -58,12 +61,12 @@ export default function Page() {
         const payload = JSON.parse(e.data);
         const incidentData: Incident = payload.data ?? payload;
         setIncident(incidentData);
-      } catch {
-        // ignore malformed frames
+      } catch (err) {
+        console.error("[SSE] Failed to parse incident event", err, e.data);
       }
     });
 
-    // Some backends emit everything as a single default "message" event with a type field
+    // Fallback: some backends emit everything as unnamed "message" events
     es.onmessage = (e: MessageEvent) => {
       try {
         const payload = JSON.parse(e.data);
@@ -78,7 +81,7 @@ export default function Page() {
           setIncident(data as Incident);
         }
       } catch {
-        // ignore
+        // non-JSON heartbeat frames are expected
       }
     };
 
@@ -96,7 +99,10 @@ export default function Page() {
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950 text-zinc-100 overflow-hidden">
-      {/* ── Top bar ── */}
+      {/* EXECUTION_MODE banner — defaults to SIMULATED when no incident */}
+      <ModeBanner mode={incident?.execution_mode ?? "simulate"} />
+
+      {/* Top bar */}
       <header className="flex items-center justify-between px-6 py-3 border-b border-zinc-800 shrink-0">
         <div className="flex items-center gap-3">
           <span className="font-mono font-bold text-lg tracking-widest text-zinc-100">
@@ -119,7 +125,7 @@ export default function Page() {
         </div>
       </header>
 
-      {/* ── System error banner ── */}
+      {/* System error banner */}
       {sysError && (
         <div className="px-6 py-2 bg-red-950/60 border-b border-red-800 font-mono text-xs text-red-400">
           {sysError}
@@ -132,30 +138,32 @@ export default function Page() {
         </div>
       )}
 
-      {/* ── Incident script banner ── */}
-      {incident?.status === "awaiting_approval" && incident.script && (
-        <div className="px-6 py-3 bg-amber-950/40 border-b border-amber-800 font-mono text-sm text-amber-300">
-          <span className="text-amber-600 text-xs tracking-widest uppercase mr-3">
-            Voice Script
-          </span>
-          {incident.script}
-        </div>
-      )}
-
-      {/* ── Main two-panel war room ── */}
+      {/* Main two-panel war room */}
       <main className="flex flex-1 overflow-hidden">
         {/* LEFT — System log */}
         <section className="flex-1 flex flex-col border-r border-zinc-800 overflow-hidden">
           <SystemLog logs={logs} />
         </section>
 
-        {/* RIGHT — Infrastructure tiles */}
-        <section className="w-80 flex flex-col overflow-hidden">
-          <InfraPanel servers={servers} incident={incident} />
+        {/* RIGHT — Infrastructure tiles + incident detail */}
+        <section className="w-96 flex flex-col overflow-hidden border-l border-zinc-800">
+          <div className="flex-1 overflow-hidden flex flex-col">
+            {/* Infra tiles take up top portion */}
+            <div className={incident ? "h-[40%] shrink-0" : "flex-1"}>
+              <InfraPanel servers={servers} incident={incident} />
+            </div>
+
+            {/* Incident detail panel below tiles when active */}
+            {incident && (
+              <div className="flex-1 overflow-y-auto">
+                <IncidentDetail incident={incident} />
+              </div>
+            )}
+          </div>
         </section>
       </main>
 
-      {/* ── Bottom trigger / approval bar ── */}
+      {/* Bottom trigger / approval bar */}
       <TriggerBar
         apiUrl={API_URL}
         incident={incident}
