@@ -1,19 +1,27 @@
 # CallSign AI — Build Roadmap
 
-**Voice-first, auto-remediating incident response.** A real production incident is caught by
-Datadog → CallSign diagnoses it and pinpoints the exact location → it auto-attempts the safe
-fixes → if that's not enough it pages the on-call engineer over Slack **and** a phone call →
-the engineer approves (voice or UI) → CallSign remediates → the war-room UI updates live.
+**A human-in-the-loop approval gate for autonomous AI agents.** An agent about to take a
+high-stakes action asks CallSign → CallSign (optionally) enriches it (blast radius, risk, log-based
+diagnosis) → routes it to the right human → the human approves over Slack/UI → the action runs (or
+the agent runs it) → the dashboard updates live. **A human decides by default; autonomy is opt-in
+and off.**
+
+**Incident response is the flagship vertical** (Vertical A below) — one *requester* of the gate,
+already built. The pivot work (N1–N6) generalizes that proven pipeline into the public gate.
 
 > Read [CLAUDE.md](CLAUDE.md) first; each area has a focused spec in `docs/`.
-> Shapes are defined once in [docs/data-contracts.md](docs/data-contracts.md).
+> Shapes are defined once in [docs/data-contracts.md](docs/data-contracts.md); the API in
+> [docs/approval-api.md](docs/approval-api.md), the client in [docs/sdk.md](docs/sdk.md).
 
 ---
 
 ## Scope & constraints
 
-- **Proof of concept.** In-memory state, no auth, no DB. Don't add infra the demo doesn't need.
-- **Simulate by default; real infra is a toggle** (`EXECUTION_MODE`). Every external
+- **Proof of concept.** In-memory state, no DB. **Single-tenant** (one shared `APPROVAL_API_KEY`,
+  your own Slack); multi-tenant is future. Don't add infra the demo doesn't need.
+- **A human decides by default.** Auto-approve is opt-in and OFF; the value is the human checkpoint,
+  not autonomy.
+- **Simulate by default; real infra is a toggle** (`EXECUTION_MODE`, gate mode only). Every external
   integration runs disabled-but-logged so the loop demos with zero accounts.
 - **Free tools first.** Lyzr Studio is available now. Datadog (Pro trial), Slack, telephony,
   Deepgram/ElevenLabs are *future* — nothing hard-depends on them.
@@ -34,7 +42,11 @@ This is the foundation everything below extends. **Don't regress it** — the te
 
 ---
 
-## Milestones (v2)
+## Vertical A — Incident response (built): milestones M1–M6
+
+> This whole block is the **flagship vertical**, already built end-to-end in simulate mode. It
+> proves the pipeline (enrich → route to a human → act). Under the v3 reframe it's **one requester**
+> of the approval gate; the autonomy here is now opt-in/off (see N4). Don't regress it.
 
 ### M1 — Multi-scenario UI
 Make all incident types demoable from the UI (answers "how do I trigger the other issues").
@@ -112,16 +124,73 @@ Make a single action genuinely affect infra, behind `EXECUTION_MODE=real`.
 
 ---
 
+## The Approval Gate (pivot) — N1–N6
+
+Generalize the proven Vertical-A pipeline into a public gate any external AI agent can call.
+
+### N1 — Generic `/approvals` + ApprovalRequest contract
+Add the public front door; the incident pipeline becomes one caller of it.
+([approval-api.md](docs/approval-api.md), [data-contracts.md](docs/data-contracts.md) §10–§12)
+- **Done when:** an agent can `POST /approvals` with an arbitrary action and it reaches a human on Slack.
+
+### N2 — Wait + execution models
+Blocking + async/callback delivery; gate + callback execution. ([remediation.md](docs/remediation.md))
+- **Done when:** a blocking caller gets the decision on the open call; a callback caller is POSTed the
+  outcome; gate mode runs the action, callback mode hands it back.
+
+### N3 — API key (single-tenant) + Python SDK
+Shared `APPROVAL_API_KEY` auth + a thin `approve()` client. ([sdk.md](docs/sdk.md))
+- **Done when:** a toy external agent uses `approve()` and blocks on a human's yes/no.
+
+### N4 — Enrichment optional + autonomy OFF by default
+Repoint the brain to enrichment (never decides); flip `AUTO_REMEDIATE` default to off.
+([agents.md](docs/agents.md), [remediation.md](docs/remediation.md))
+- **Done when:** by default every action waits for a human; enrichment can be toggled per request.
+
+### N5 — Generic approvals dashboard UI
+War-room → queue of pending requests from any source. ([frontend.md](docs/frontend.md))
+- **Done when:** an agent's approval request and an incident both appear in one live queue.
+
+### N6 — Smart triage
+Log-based diagnosis (caller sends `diagnostics` → pinpoint from the trace) + expertise routing
+(ownership map → owner, fall back to on-call). ([triage.md](docs/triage.md))
+- **Done when:** a request carrying logs reaches the *right* expert on Slack with the error
+  pre-pinpointed and a suggested action.
+
+**Future:** multi-tenant (signup, per-customer key issuance, per-customer Slack OAuth); voice
+channel; routing boosters (deploy metadata, read-only Git/CODEOWNERS, past-incident memory).
+
+---
+
 ## Critical path & sequencing
 
-`M1 → M2 → M3 → M4 → M5 → M6`. M2+M3 are the soul (real AI + autonomy); M4 is the
-human-in-the-loop drama; M5 is the headline ("real Datadog alert"); M6 proves the toggle is
-real. De-risk **M4's Lyzr per-call context injection** with a short Studio spike before
-building it.
+**Vertical A (built):** `M1 → M2 → M3 → M4 → M5 → M6`. M2+M3 are the soul; M4 is the
+human-in-the-loop drama; M5 is the "real Datadog alert"; M6 proves the executor toggle.
+
+**Pivot:** `N1 → N2 → N3 → N4 → N5 → N6`. N1–N3 stand up the public gate + SDK (the new product);
+N4 makes human-by-default real; N5 gives it a face; N6 is the differentiator (smart triage). De-risk
+voice (a future channel) separately — it needs Lyzr premium and is not on this path.
+
+## Testing & verification (E2E)
+
+The whole product is testable **without don-drapor or any cloud account** — it's simulate-first. A
+tiny **fake-agent** script drives every path; build a small `harness/` of these alongside N3 (it
+doubles as the demo). Full strategy + a feature-coverage table in [docs/testing.md](docs/testing.md).
+- **N1–N6 each get a "Done when" curl/script check** plus a pytest case (extend the existing suite).
+- don-drapor is needed **only** for the two optional "genuinely real" finales (a real Datadog alert
+  source; a real executor rollback) — never to verify a feature works.
 
 ## The 90-second demo (target)
-1. War-room UI on screen. Induce a fault in Don Draper (or click Simulate Alert).
-2. Watch CallSign diagnose, pinpoint the exact route/deploy, and **auto-attempt a rollback**.
-3. It "fails" verification → **Slack pings + your phone rings**; the voice reads the tailored
-   script; you say "yes."
-4. The affected service flips to **RECOVERED / ROLLED BACK** instantly. Record it.
+
+**Headline (the gate):**
+1. Approvals dashboard on screen. A toy agent decides it wants to **"delete 14,000 stale records"**
+   and calls `approve(...)` — it pauses.
+2. CallSign enriches (risk: irreversible; blast radius) and **pings you on Slack** with the action
+   and an Approve/Deny.
+3. You click **Approve**. The decision returns to the agent, which proceeds — and the request flips
+   to **APPROVED** on the dashboard live. No autonomy: a human pulled the trigger.
+
+**Secondary (the incident vertical + smart triage):**
+4. An agent hits an error and sends **logs**. CallSign pinpoints the failing route/deploy from the
+   stack trace, routes it to **the engineer who owns Payments**, suggests a rollback; you approve;
+   the service flips to **ROLLED BACK**. Record it.

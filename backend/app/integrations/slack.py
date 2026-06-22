@@ -1,19 +1,20 @@
 """
-Slack integration (slack.md, data-contracts §9).
+Slack integration — generic approval card for the human-in-the-loop gate.
 
 When SLACK_ENABLED is False (default):
     - Builds the Block Kit card dict.
-    - Emits it as a "SLACK" log: "[SLACK] would post: <summary>"
+    - Logs it as a "SLACK" log event: "[SLACK] would post: <summary>"
     - Makes NO network call.
 
 When SLACK_ENABLED is True:
     - Uses slack_sdk.WebClient (imported lazily) with SLACK_BOT_TOKEN.
-    - Posts to engineer.slack_id (DM) or SLACK_CHANNEL override.
+    - Posts to engineer.slack_id (DM).
 
-post_incident(engineer, incident, log) -> None
-post_thread(incident, text, log) -> None
+post_approval(req, approver, log) -> None
+    Posts an approval card for an ApprovalRequest.
 
-`log` is log(source: str, message: str).
+post_thread(req, text, log) -> None
+    Posts a thread reply to an earlier approval card (e.g. resolution update).
 """
 from __future__ import annotations
 
@@ -31,106 +32,87 @@ from app.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def _build_card(engineer: dict, incident: dict) -> dict:
-    """Build the Block Kit message payload (data-contracts §9)."""
-    inc_id = incident.get("incident_id", "unknown")
-    diagnosis = incident.get("diagnosis") or {}
-    plan = incident.get("plan") or {}
+def _build_approval_card(req: dict, approver: dict) -> dict:
+    """Build the Block Kit message payload for an approval request."""
+    req_id = req.get("request_id", "unknown")
+    action = req.get("action", "unknown action")
+    context = req.get("context") or ""
+    risk = req.get("risk") or "unknown"
+    dangers: list[str] = req.get("dangers") or []
+    estimated_tokens: int | None = req.get("estimated_tokens")
 
-    severity = diagnosis.get("severity", "SEV-?")
-    service = diagnosis.get("affected_service", "unknown")
-    exact = diagnosis.get("exact_location") or {}
-    route = exact.get("route", "")
-    deploy_id = exact.get("deploy_id", "")
-    commit = exact.get("commit", "")
-    summary = diagnosis.get("summary", "")
+    dashboard_url = PUBLIC_BACKEND_URL or "http://localhost:3000"
 
-    steps = plan.get("steps", [])
-    proposed = steps[0].get("description", "") if steps else ""
-
-    ui_url = f"{PUBLIC_BACKEND_URL}/incident/{inc_id}" if PUBLIC_BACKEND_URL else f"/incident/{inc_id}"
-
-    header_text = f"🚨 {severity} · {service} ({service})"
-
-    where_parts = []
-    if route:
-        where_parts.append(f"`{route}`")
-    if deploy_id:
-        where_parts.append(f"deploy `{deploy_id}`")
-    if commit:
-        where_parts.append(f"(`{commit}`)")
-    where_str = " · ".join(where_parts) if where_parts else "see incident"
-
-    blocks = [
+    blocks: list[dict] = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": header_text},
+            "text": {"type": "plain_text", "text": f"Approval required: {action}"},
         },
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    f"*Where:* {where_str}\n"
-                    f"*What:* {summary}\n"
+                    f"*Context:* {context or '(none)'}\n"
+                    f"*Risk:* {risk}"
                 ),
             },
         },
     ]
 
-    script = plan.get("script", "")
-    if script:
+    if dangers:
+        danger_lines = "\n".join(f"• {d}" for d in dangers)
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"📞 *{script}*"},
+            "text": {"type": "mrkdwn", "text": f"*Dangers:*\n{danger_lines}"},
         })
-    elif proposed:
+
+    if estimated_tokens is not None:
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*Proposed:* {proposed}"},
+            "text": {"type": "mrkdwn", "text": f"*Estimated Lyzr tokens:* {estimated_tokens:,}"},
         })
 
     actions_elements: list[dict] = [
         {
             "type": "button",
-            "style": "primary",
             "text": {"type": "plain_text", "text": "Open CallSign"},
-            "url": ui_url,
-        }
+            "url": dashboard_url,
+        },
     ]
 
     if SLACK_INTERACTIVE:
-        actions_elements.append({
+        actions_elements.insert(0, {
             "type": "button",
             "style": "primary",
             "text": {"type": "plain_text", "text": "Approve"},
             "action_id": "approve",
-            "value": inc_id,
+            "value": req_id,
         })
-        actions_elements.append({
+        actions_elements.insert(1, {
             "type": "button",
             "style": "danger",
             "text": {"type": "plain_text", "text": "Deny"},
             "action_id": "deny",
-            "value": inc_id,
+            "value": req_id,
         })
 
     blocks.append({"type": "actions", "elements": actions_elements})
 
     return {
-        "channel": engineer.get("slack_id", ""),
-        "text": f"🚨 {severity} incident on {service} — approval needed",
+        "channel": approver.get("slack_id", ""),
+        "text": f"Approval required: {action} — risk: {risk}",
         "blocks": blocks,
     }
 
 
-def post_incident(engineer: dict, incident: dict, log: Callable[[str, str], None]) -> None:
-    """Post the incident card (§9) to the engineer's Slack DM.
+def post_approval(req: dict, approver: dict, log: Callable[[str, str], None]) -> None:
+    """Post the approval card to the approver's Slack DM.
 
     When disabled, logs the card summary instead of posting.
     """
-    card = _build_card(engineer, incident)
-    summary = card.get("text", "incident card")
+    card = _build_approval_card(req, approver)
+    summary = card.get("text", "approval card")
 
     if not SLACK_ENABLED:
         log("SLACK", f"[SLACK] would post: {summary}")
@@ -138,35 +120,34 @@ def post_incident(engineer: dict, incident: dict, log: Callable[[str, str], None
         return
 
     try:
-        import slack_sdk  # noqa: F401 — lazy import so disabled mode needs no dep
-        from slack_sdk import WebClient
+        from slack_sdk import WebClient  # noqa: F401 — lazy import
         client = WebClient(token=SLACK_BOT_TOKEN)
         response = client.chat_postMessage(**card)
         ts = response.get("ts", "")
-        log("SLACK", f"Posted incident to @{engineer.get('name')} (ts={ts})")
-        logger.info("[SLACK] posted to %s ts=%s", card["channel"], ts)
+        log("SLACK", f"Posted approval card to @{approver.get('name')} (ts={ts})")
+        logger.info("[SLACK] posted approval card to %s ts=%s", card["channel"], ts)
 
         # Stash ts for thread replies
-        incident["_slack_ts"] = ts
-        incident["_slack_channel"] = card["channel"]
+        req["_slack_ts"] = ts
+        req["_slack_channel"] = card["channel"]
 
     except Exception:
-        logger.exception("[SLACK] post_incident failed for incident %s", incident.get("incident_id"))
-        log("SLACK", f"[SLACK] post failed — see logs")
+        logger.exception("[SLACK] post_approval failed for request %s", req.get("request_id"))
+        log("SLACK", "[SLACK] post failed — see logs")
 
 
-def post_thread(incident: dict, text: str, log: Callable[[str, str], None]) -> None:
-    """Post a thread reply to the original incident message.
+def post_thread(req: dict, text: str, log: Callable[[str, str], None]) -> None:
+    """Post a thread reply to the original approval message (e.g. resolution update).
 
-    When disabled, logs the reply text.
+    When disabled, logs the text.
     """
     if not SLACK_ENABLED:
         log("SLACK", f"[SLACK] would thread: {text}")
         logger.info("[SLACK] disabled — would post thread: %s", text)
         return
 
-    channel = incident.get("_slack_channel")
-    ts = incident.get("_slack_ts")
+    channel = req.get("_slack_channel")
+    ts = req.get("_slack_ts")
 
     if not channel or not ts:
         log("SLACK", "[SLACK] thread skipped — no parent message ts")
@@ -179,5 +160,5 @@ def post_thread(incident: dict, text: str, log: Callable[[str, str], None]) -> N
         log("SLACK", f"[SLACK] thread posted: {text}")
         logger.info("[SLACK] thread posted to %s ts=%s", channel, ts)
     except Exception:
-        logger.exception("[SLACK] post_thread failed for incident %s", incident.get("incident_id"))
-        log("SLACK", f"[SLACK] thread post failed — see logs")
+        logger.exception("[SLACK] post_thread failed for request %s", req.get("request_id"))
+        log("SLACK", "[SLACK] thread post failed — see logs")

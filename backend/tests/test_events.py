@@ -1,7 +1,7 @@
 """SSE pub/sub fan-out and event shapes (data-contracts §7)."""
 from __future__ import annotations
 
-from app import events, state
+from app import events
 
 
 def test_publish_fans_out_to_all_subscribers():
@@ -32,35 +32,36 @@ def test_emit_log_has_source_message_and_timestamp():
     assert evt["type"] == "log"
     assert evt["data"]["source"] == "AGENT"
     assert evt["data"]["message"] == "hello"
-    assert evt["data"]["ts"]  # ISO timestamp present
+    assert evt["data"]["ts"]
 
 
-def test_emit_log_remediation_source():
+def test_emit_log_system_source():
     q = events.subscribe()
 
-    events.emit_log("REMEDIATION", "rolling back payment-gw")
+    events.emit_log("SYSTEM", "gate decision made")
 
     evt = q.get_nowait()
-    assert evt["data"]["source"] == "REMEDIATION"
+    assert evt["data"]["source"] == "SYSTEM"
 
 
-def test_emit_state_carries_current_servers():
+def test_emit_approval_carries_request():
     q = events.subscribe()
 
-    state.set_status("auth-01", "isolated")  # this itself emits a state event
+    req = {"request_id": "apr-test", "status": "approved"}
+    events.emit_approval(req)
 
     evt = q.get_nowait()
-    assert evt["type"] == "state"
-    auth = next(s for s in evt["data"]["servers"] if s["id"] == "auth-01")
-    assert auth["status"] == "isolated"
+    assert evt["type"] == "approval"
+    assert evt["data"]["request_id"] == "apr-test"
+    assert evt["data"]["status"] == "approved"
 
 
-def test_emit_state_carries_degraded_status():
-    q = events.subscribe()
+def test_multiple_subscribers_all_receive_approval():
+    q1 = events.subscribe()
+    q2 = events.subscribe()
 
-    state.set_status("payment-gw", "degraded")
+    req = {"request_id": "apr-multi", "status": "denied"}
+    events.emit_approval(req)
 
-    evt = q.get_nowait()
-    assert evt["type"] == "state"
-    pgw = next(s for s in evt["data"]["servers"] if s["id"] == "payment-gw")
-    assert pgw["status"] == "degraded"
+    assert q1.get_nowait()["data"]["request_id"] == "apr-multi"
+    assert q2.get_nowait()["data"]["request_id"] == "apr-multi"

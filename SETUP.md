@@ -2,8 +2,8 @@
 
 What you need to provide **externally** (accounts, API keys, config) to light up each
 capability. **Everything runs today in simulate mode with ZERO external accounts** — this
-guide is the upgrade path. All secrets go in `backend/.env` (gitignored); see
-`backend/.env.example` for the full list.
+guide is the upgrade path. Single-tenant for now (one `APPROVAL_API_KEY`, your own Slack). All
+secrets go in `backend/.env` (gitignored); see `backend/.env.example` for the full list.
 
 ---
 
@@ -20,9 +20,50 @@ Debug logs stream to `backend/logs/callsign.log` (rotating) and the console.
 
 ---
 
+## A. External agent setup (how others hook up) — *the v3 gate*
+
+Connect *any* AI agent so it pauses for a human before a risky action. See
+`docs/sdk.md` + `docs/approval-api.md`.
+
+1. Set a shared key in `backend/.env` (single-tenant for now):
+   ```
+   APPROVAL_API_KEY=cs_live_...        # callers send it as the X-API-Key header
+   ```
+2. The caller installs the client (`pip install callsign`) or just POSTs to `/approvals`.
+3. One call before the risky action — and, optionally, attach `diagnostics` (logs) so the
+   request arrives pre-diagnosed and routed to the right expert:
+   ```python
+   decision = approve(api_key="cs_live_...", base_url="https://<your-backend>",
+                      action="Refund $5,000 to customer 8831",
+                      context="Disputed duplicate charge", mode="callback", timeout=300)
+   if decision.approved: issue_refund()
+   ```
+Without `APPROVAL_API_KEY` set, `/approvals` rejects with 401. Multi-tenant signup / per-customer
+key issuance is **future**.
+
+## B. Ownership map (expertise routing) — *no code access*
+
+Route approvals to the engineer who **owns** the affected area, not just whoever's on-call.
+See `docs/triage.md`.
+
+1. In `backend/data/on_call.json`, give each engineer an **`owns`** list (service ids, service
+   names, or route prefixes — §8):
+   ```json
+   { "id": "eng-02", "name": "Priya", "slack_id": "U02PRIYA", "owns": ["payment-gw", "Payments", "/api/checkout"], "...": "shift fields" }
+   ```
+2. Turn it on: `EXPERTISE_ROUTING=true` in `backend/.env`.
+3. Behavior: a diagnosed area is matched to an owner; if none matches (or they're unavailable) it
+   **falls back** to the on-call rule. Best-effort by design.
+
+Boosters — **deploy metadata** (caller-sent), **read-only Git/CODEOWNERS**, and **past-incident
+memory** — are *future*; the uploaded ownership map needs zero code access.
+
+---
+
 ## 1. Lyzr Studio brain (Diagnostician + Strategist) — *uses your Lyzr credits*
 
-Replaces the rule-based fallback with real AI. See `docs/agents.md`.
+Optional **enrichment** — blast radius, risk, a clear summary, log-based diagnosis — replacing the
+deterministic fallback with real AI. It never decides approve/deny. See `docs/agents.md`.
 
 1. In **Lyzr Studio**, create **two agents**:
    - **Diagnostician** — paste the system prompt from `docs/agents.md` (Agent 1). Attach the
@@ -110,10 +151,15 @@ Until an adapter exists, keep `EXECUTION_MODE=simulate`. Plus the provider's own
 
 | Capability | Keys to set | Toggle |
 |---|---|---|
+| External agent gate (`/approvals`) | `APPROVAL_API_KEY` | (required for the public front door) |
+| Enrichment (brain on a request) | — | `ENRICH_REQUESTS=true` (default) |
+| Expertise routing | `owns` in `on_call.json` | `EXPERTISE_ROUTING=true` |
+| Opt-in auto-approve | — | `AUTO_REMEDIATE=true` (**default off**) |
 | Real AI brain | `LYZR_API_KEY`, `LYZR_DIAGNOSTICIAN_AGENT_ID`, `LYZR_STRATEGIST_AGENT_ID` | (auto when set) |
-| Voice call | `LYZR_VOICE_AGENT_ID`, `PUBLIC_BACKEND_URL` | `VOICE_ENABLED=true` |
+| Voice call (future channel) | `LYZR_VOICE_AGENT_ID`, `PUBLIC_BACKEND_URL` | `VOICE_ENABLED=true` |
 | Slack | `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET` | `SLACK_ENABLED=true` |
 | Datadog | (webhook config in Datadog) + `PUBLIC_BACKEND_URL` | — |
-| Real infra actions | provider creds + an adapter | `EXECUTION_MODE=real` |
+| Real infra actions (gate mode) | provider creds + an adapter | `EXECUTION_MODE=real` |
 
-Leave everything unset → full simulate demo, no accounts, nothing real touched.
+Leave everything unset → full simulate demo, no accounts, nothing real touched, every action
+waits for a human.

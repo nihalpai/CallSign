@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+setup.py
+callsign/__init__.py
+callsign/client.py
+callsign.egg-info/PKG-INFO
+callsign.egg-info/SOURCES.txt
+callsign.egg-info/dependency_links.txt
+callsign.egg-info/requires.txt
+callsign.egg-info/top_level.txt
+tests/test_client.py

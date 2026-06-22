@@ -27,16 +27,9 @@ def unsubscribe(q: asyncio.Queue) -> None:
     _subscribers.discard(q)
 
 
-# Helpers — build the typed event dicts defined in data-contracts §7
-
 def emit_log(source: str, message: str) -> None:
     publish({"type": "log", "data": {"source": source, "message": message, "ts": _now_iso()}})
 
 
-def emit_state() -> None:
-    from app.state import get_state
-    publish({"type": "state", "data": get_state()})
-
-
-def emit_incident(inc: dict[str, Any]) -> None:
-    publish({"type": "incident", "data": inc})
+def emit_approval(req: dict[str, Any]) -> None:
+    publish({"type": "approval", "data": req})

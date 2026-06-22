@@ -1,8 +1,9 @@
-"""POST /slack/interactions — optional Slack interactive action handler.
+"""POST /slack/interactions — Slack interactive action handler.
 
 Only active when SLACK_INTERACTIVE=true (disabled by default).
-Verifies the Slack request signature, parses the action payload,
-maps it to an incident/decision, and delegates to execute_step.
+Verifies the Slack request signature (HMAC-SHA256), parses the action payload,
+maps the button value to an apr-* request_id, and resolves it via the same
+path as /execute (resolve + fire waiter + callback + SSE).
 """
 from __future__ import annotations
 
@@ -15,8 +16,7 @@ from typing import Annotated, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from app.config import SLACK_INTERACTIVE, SLACK_SIGNING_SECRET
-from app.events import emit_log, emit_incident
-from app.incidents import get_incident, set_decision, set_status, add_attempt
+from app.events import emit_log, emit_approval
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -24,15 +24,10 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
-def _verify_slack_signature(
-    body: bytes,
-    timestamp: str,
-    signature: str,
-) -> bool:
+def _verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:
     """Verify the Slack request using the signing secret (HMAC-SHA256)."""
     if not SLACK_SIGNING_SECRET:
         return False
-    # Reject requests older than 5 minutes
     try:
         if abs(time.time() - int(timestamp)) > 300:
             return False
@@ -59,7 +54,6 @@ async def slack_interactions(
 
     body = await request.body()
 
-    # Verify signature
     if not _verify_slack_signature(
         body,
         x_slack_request_timestamp or "",
@@ -67,7 +61,6 @@ async def slack_interactions(
     ):
         raise HTTPException(status_code=403, detail="Invalid Slack signature")
 
-    # Slack sends application/x-www-form-urlencoded with a "payload" key
     try:
         form_data = urllib.parse.parse_qs(body.decode("utf-8"))
         payload_str = form_data.get("payload", ["{}"])[0]
@@ -76,51 +69,56 @@ async def slack_interactions(
         logger.exception("slack_interactions: failed to parse payload")
         raise HTTPException(status_code=400, detail="Invalid payload")
 
-    # Extract action
     actions = payload.get("actions", [])
     if not actions:
         return {"ok": True}
 
     action = actions[0]
     action_id = action.get("action_id", "")
-    incident_id = action.get("value", "")
+    request_id = action.get("value", "")
 
     if action_id not in ("approve", "deny"):
         return {"ok": True}
 
-    inc = get_incident(incident_id)
-    if inc is None:
-        logger.warning("slack_interactions: incident %s not found", incident_id)
-        return {"ok": True, "warning": f"Incident {incident_id} not found"}
+    from app.requests import get_request, resolve_request
+    stored = get_request(request_id)
+    if stored is None:
+        logger.warning("slack_interactions: request %s not found", request_id)
+        return {"ok": True, "warning": f"Request {request_id} not found"}
 
-    # Derive actor from the Slack user who clicked
+    _TERMINAL = {"approved", "denied", "returned", "executed", "timed_out"}
+    if stored.get("status") in _TERMINAL:
+        emit_log("SYSTEM", f"[WARN] Request {request_id} already {stored['status']} — no-op")
+        return {"ok": True}
+
     slack_user = payload.get("user", {})
-    actor = slack_user.get("id", "slack-user")
+    actor = slack_user.get("id") or slack_user.get("username") or "slack-user"
 
-    def log(source: str, message: str) -> None:
-        emit_log(source, message)
+    decision = "approve" if action_id == "approve" else "deny"
+    stored = resolve_request(request_id, decision, actor)
+    if stored is None:
+        return {"ok": True, "warning": f"Request {request_id} not found after resolve"}
 
-    # Get the first pending step from the plan
-    plan = inc.get("plan") or {}
-    steps = plan.get("steps", [])
-    pending_step = steps[0] if steps else {}
-    action_name = pending_step.get("action", "isolate_container")
-    target = pending_step.get("target", inc.get("target", "unknown"))
+    emit_log("SYSTEM", f"Slack: {actor} {decision}d request {request_id}")
+    emit_approval(stored)
 
-    if action_id == "approve":
+    # Best-effort callback delivery
+    callback_url = stored.get("callback_url")
+    outcome = stored.get("outcome")
+    if callback_url and outcome:
         try:
-            from app.remediation.engine import execute_step
-            execute_step(inc, action_name, target, actor, log)
+            import httpx
+            resp = httpx.post(callback_url, json=outcome, timeout=10.0)
+            logger.info("Slack callback for %s → %s: HTTP %s", request_id, callback_url, resp.status_code)
         except Exception:
-            logger.exception("slack_interactions: execute_step raised for incident %s", incident_id)
-    else:
-        from datetime import datetime, timezone
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        add_attempt(incident_id, {"action": action_name, "target": target, "actor": actor, "result": "denied", "ts": ts})
-        set_decision(incident_id, "deny")
-        set_status(incident_id, "failed")
-        updated = get_incident(incident_id)
-        log("SYSTEM", f"Slack: {actor} denied {action_name} on {target}")
-        emit_incident(updated)
+            logger.exception("Slack callback delivery failed for %s", request_id)
+
+    # Post thread update
+    try:
+        from app.integrations.slack import post_thread
+        label = "✅ Approved" if decision == "approve" else "❌ Denied"
+        post_thread(stored, f"{label} by {actor}", emit_log)
+    except Exception:
+        logger.exception("post_thread failed for request %s", request_id)
 
     return {"ok": True}

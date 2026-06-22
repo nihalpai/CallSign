@@ -8,7 +8,8 @@
       "timezone": "America/New_York",
       "shift_start": "09:00",
       "shift_end": "21:00",
-      "status": "active"
+      "status": "active",
+      "owns": ["auth-01", "Authentication", "/api/login", "db-01", "Postgres"]
     },
     {
       "id": "eng-02",
@@ -18,7 +19,8 @@
       "timezone": "Asia/Kolkata",
       "shift_start": "21:00",
       "shift_end": "09:00",
-      "status": "active"
+      "status": "active",
+      "owns": ["payment-gw", "Payments", "/api/checkout", "web-01", "Web"]
     }
   ]
 }

@@ -1,70 +1,85 @@
-"""POST /execute — single entry point for every approval channel.
+"""POST /execute — decision sink for approval requests.
 
-Body: §6 ExecuteRequest (incident_id, decision, action, target, actor).
+Accepts ExecuteRequest with request_id (or incident_id alias) + decision + actor.
 
-Flow:
-    - 404 if incident not found.
-    - Idempotent no-op + warning log if already resolved or failed.
-    - approve → execute_step (runs action, records attempt, resolves/updates).
-    - deny   → record decision + attempt, set status "failed", emit log + incident.
-    - Returns the updated incident (§5).
+On a decision:
+  - resolve_request sets status + outcome (already fires_waiter internally).
+  - Best-effort POST to callback_url if set.
+  - emit_approval to push the updated request to SSE subscribers.
+
+There is no gate-execution here — the calling agent performs its own action after
+receiving the approved DecisionOutcome.  Gate/real-execution is reserved for a future
+provider adapter layer; see docs/remediation.md.
+
+Idempotent: already-decided requests return a no-op response.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException
-from app.models import ExecuteRequest, Incident
-from app.incidents import get_incident, set_decision, set_status, add_attempt
-from app.events import emit_log, emit_incident
+from app.models import ExecuteRequest
+from app.events import emit_log, emit_approval
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter()
 
-_TERMINAL = {"resolved", "failed"}
+_TERMINAL_APR = {"approved", "denied", "returned", "executed", "timed_out"}
 
 
-@router.post("/execute", response_model=Incident)
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _post_callback(req_id: str, url: str, outcome: dict) -> None:
+    try:
+        import httpx
+        resp = httpx.post(url, json=outcome, timeout=10.0)
+        logger.info("Callback for %s → %s: HTTP %s", req_id, url, resp.status_code)
+    except Exception:
+        logger.exception("Callback delivery failed for request %s → %s", req_id, url)
+        emit_log("SYSTEM", f"[WARN] Callback delivery failed for {req_id} → {url}")
+
+
+@router.post("/execute")
 async def execute(req: ExecuteRequest) -> dict:
-    def log(source: str, message: str) -> None:
-        emit_log(source, message)
+    from app.requests import get_request, resolve_request
 
-    inc = get_incident(req.incident_id)
-    if inc is None:
-        raise HTTPException(status_code=404, detail=f"Incident {req.incident_id} not found")
+    req_id = req.get_request_id()
+    if not req_id:
+        raise HTTPException(status_code=422, detail="request_id or incident_id is required")
 
-    # Idempotency — already in a terminal state
-    if inc["status"] in _TERMINAL:
-        log("SYSTEM", f"[WARN] Incident {req.incident_id} already {inc['status']} — no-op")
-        return inc
+    stored = get_request(req_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"Approval request {req_id} not found")
 
-    if req.decision == "approve":
-        try:
-            from app.remediation.engine import execute_step
-            inc = execute_step(inc, req.action, req.target, req.actor, log)
-        except Exception:
-            logger.exception(
-                "execute: execute_step raised for incident %s action=%s",
-                req.incident_id, req.action,
-            )
-            log("SYSTEM", f"execute_step error for incident {req.incident_id} — see server logs")
+    # Idempotency guard
+    if stored.get("status") in _TERMINAL_APR:
+        emit_log("SYSTEM", f"[WARN] Request {req_id} already {stored['status']} — no-op")
+        return stored
 
-    elif req.decision == "deny":
-        from datetime import datetime, timezone
+    decision = req.decision
+    stored = resolve_request(req_id, decision, req.actor, detail=req.detail)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"Approval request {req_id} not found")
 
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        attempt = {
-            "action": req.action,
-            "target": req.target,
-            "actor": req.actor,
-            "result": "denied",
-            "ts": ts,
-        }
-        add_attempt(req.incident_id, attempt)
-        set_decision(req.incident_id, "deny")
-        set_status(req.incident_id, "failed")
-        inc = get_incident(req.incident_id)
-        log("SYSTEM", f"Action {req.action} on {req.target} denied by {req.actor}")
-        emit_incident(inc)
+    emit_log("SYSTEM", f"Request {req_id} {decision} by {req.actor}")
+    emit_approval(stored)
 
-    return inc
+    # Best-effort callback delivery
+    callback_url = stored.get("callback_url")
+    outcome = stored.get("outcome")
+    if callback_url and outcome:
+        _post_callback(req_id, callback_url, outcome)
+
+    # Post Slack thread with resolution
+    try:
+        from app.integrations.slack import post_thread
+        label = "✅ Approved" if decision == "approve" else "❌ Denied"
+        post_thread(stored, f"{label} by {req.actor}", emit_log)
+    except Exception:
+        logger.exception("post_thread failed for request %s", req_id)
+
+    return stored

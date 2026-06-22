@@ -4,161 +4,6 @@ from pydantic import BaseModel
 
 
 # ---------------------------------------------------------------------------
-# §1 — Inbound alert
-# ---------------------------------------------------------------------------
-class Alert(BaseModel):
-    alert_id: str
-    title: str
-    alert_type: str
-    priority: str
-    tags: list[str]
-    body: str
-    host: str
-    timestamp: str
-    # sim_resolves_after is a demo fixture hint — ignored by production logic
-    sim_resolves_after: Optional[str] = None
-
-
-# ---------------------------------------------------------------------------
-# §2 — Infrastructure state
-# ---------------------------------------------------------------------------
-ServerStatus = Literal["healthy", "compromised", "isolated", "degraded", "rolled_back", "recovered"]
-
-
-class Server(BaseModel):
-    id: str
-    name: str
-    service: str
-    status: ServerStatus
-    depended_on_by: list[str]
-    container: str
-
-
-class InfraState(BaseModel):
-    servers: list[Server]
-
-
-# ---------------------------------------------------------------------------
-# §2b — Deployments state
-# ---------------------------------------------------------------------------
-class DeploySnapshot(BaseModel):
-    deploy_id: str
-    commit: str
-    deployed_at: str
-    healthy: bool
-
-
-class Deployment(BaseModel):
-    service: str
-    current: DeploySnapshot
-    previous: DeploySnapshot
-
-
-class DeploymentsState(BaseModel):
-    deployments: list[Deployment]
-
-
-# ---------------------------------------------------------------------------
-# §3 — Diagnosis (Agent 1 "Diagnostician" output)
-# ---------------------------------------------------------------------------
-class ExactLocation(BaseModel):
-    service: str
-    route: Optional[str] = None
-    deploy_id: Optional[str] = None
-    commit: Optional[str] = None
-    datadog_link: Optional[str] = None
-
-
-class Diagnosis(BaseModel):
-    incident_type: Literal[
-        "security", "bad_deploy", "error_spike", "latency", "crash_loop", "resource_exhaustion"
-    ]
-    severity: str
-    affected_service: str
-    exact_location: ExactLocation
-    blast_radius: list[str]
-    runbook: str
-    confidence: float
-    summary: str
-    rationale: str
-    cve: Optional[str] = None
-
-
-# ---------------------------------------------------------------------------
-# §4 — Remediation plan (Agent 2 "Strategist" output)
-# ---------------------------------------------------------------------------
-class RemediationStep(BaseModel):
-    action: str
-    target: str
-    autonomy: Literal["auto", "human"]
-    reversible: bool
-    description: str
-
-
-class RemediationPlan(BaseModel):
-    summary: str
-    steps: list[RemediationStep]
-    script: str
-
-
-# ---------------------------------------------------------------------------
-# §5 — Incident object (expanded in v2)
-# ---------------------------------------------------------------------------
-class Attempt(BaseModel):
-    action: str
-    target: str
-    actor: str
-    result: Literal["succeeded", "failed", "denied"]
-    ts: str
-
-
-class AssignedEngineer(BaseModel):
-    id: str
-    name: str
-    channels: list[str]
-
-
-IncidentStatus = Literal[
-    "received",
-    "diagnosing",
-    "remediating",
-    "verifying",
-    "escalated",
-    "awaiting_approval",
-    "resolved",
-    "failed",
-]
-
-
-class Incident(BaseModel):
-    incident_id: str
-    status: IncidentStatus
-    execution_mode: str = "simulate"
-    diagnosis: Optional[dict] = None
-    plan: Optional[dict] = None
-    attempts: list[dict] = []
-    assigned_engineer: Optional[dict] = None
-    decision: Optional[Literal["approve", "deny"]] = None
-    created_at: str
-
-    # v1 backward-compat fields (still read by test_api.py)
-    action: Optional[str] = None
-    target: Optional[str] = None
-    script: Optional[str] = None
-
-
-# ---------------------------------------------------------------------------
-# §6 — /execute request body (expanded in v2)
-# ---------------------------------------------------------------------------
-class ExecuteRequest(BaseModel):
-    incident_id: str
-    decision: Literal["approve", "deny"]
-    action: str
-    target: str
-    actor: str = "auto"
-
-
-# ---------------------------------------------------------------------------
 # §8 — On-call engineer registry
 # ---------------------------------------------------------------------------
 class Engineer(BaseModel):
@@ -177,16 +22,101 @@ class OnCallRegistry(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Response shapes
+# §13b — Diagnostics input (optional caller-supplied logs for enrichment)
 # ---------------------------------------------------------------------------
-class TriggerResponse(BaseModel):
-    incident_id: str
+class DiagnosticsInput(BaseModel):
+    logs: Optional[str] = None
+    stack_trace: Optional[str] = None
+    deploys: Optional[list[dict]] = None
+
+
+# ---------------------------------------------------------------------------
+# §12 — Requester identity
+# ---------------------------------------------------------------------------
+class RequesterIdentity(BaseModel):
+    source: str = "agent"
+    name: Optional[str] = None
+    tenant: Optional[str] = None  # FUTURE: multi-tenant
+
+
+# ---------------------------------------------------------------------------
+# §10 — ApprovalRequest (POST body = ApprovalCreate; stored form = ApprovalRequest)
+# ---------------------------------------------------------------------------
+class ApprovalCreate(BaseModel):
+    """The shape the caller POSTs.  Server assigns request_id, created_at, status."""
+    requester: Optional[RequesterIdentity] = None
+    action: str
+    target: Optional[str] = None
+    context: Optional[str] = None
+    diagnostics: Optional[DiagnosticsInput] = None
+    risk: Optional[str] = None
+    reversible: bool = True
+    mode: Literal["gate", "callback"] = "gate"
+    callback_url: Optional[str] = None
+    wait: Literal["blocking", "async"] = "blocking"
+    timeout_sec: int = 300
+    approvers: Optional[list[str]] = None
+    estimated_tokens: Optional[int] = None
+    dangers: Optional[list[str]] = None
+
+
+class ApprovalRequest(BaseModel):
+    """Server-side stored form — includes server-assigned fields."""
+    request_id: str
+    requester: RequesterIdentity
+    action: str
+    target: Optional[str] = None
+    context: Optional[str] = None
+    diagnostics: Optional[dict] = None
+    risk: Optional[str] = None
+    reversible: bool = True
+    mode: Literal["gate", "callback"] = "gate"
+    callback_url: Optional[str] = None
+    wait: Literal["blocking", "async"] = "blocking"
+    timeout_sec: int = 300
+    approvers: Optional[list[str]] = None
+    estimated_tokens: Optional[int] = None
+    dangers: Optional[list[str]] = None
+    created_at: str
+    status: str = "created"
+    assigned_approver: Optional[str] = None
+    outcome: Optional[dict] = None
+
+
+# ---------------------------------------------------------------------------
+# §11 — Decision outcome (returned by blocking call + POSTed to callback_url)
+# ---------------------------------------------------------------------------
+class DecisionOutcome(BaseModel):
+    request_id: str
+    approved: bool
+    decision: Literal["approve", "deny", "timeout"]
+    actor: Optional[str] = None
+    decided_at: Optional[str] = None
+    detail: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# §6 — /execute request body
+# ---------------------------------------------------------------------------
+class ExecuteRequest(BaseModel):
+    # Accept request_id (preferred) or incident_id (legacy alias)
+    request_id: Optional[str] = None
+    incident_id: Optional[str] = None
+    decision: Literal["approve", "deny"]
+    action: Optional[str] = None
+    target: Optional[str] = None
+    actor: str = "auto"
+    detail: Optional[str] = None
+
+    def get_request_id(self) -> Optional[str]:
+        """Return the effective request identifier (request_id preferred over incident_id)."""
+        return self.request_id or self.incident_id
 
 
 # ---------------------------------------------------------------------------
 # §7 — SSE event payload models
 # ---------------------------------------------------------------------------
-LogSource = Literal["AGENT", "SYSTEM", "REMEDIATION", "SLACK", "VOICE"]
+LogSource = Literal["AGENT", "SYSTEM", "SLACK"]
 
 
 class LogEventData(BaseModel):
@@ -198,13 +128,3 @@ class LogEventData(BaseModel):
 class LogEvent(BaseModel):
     type: Literal["log"] = "log"
     data: LogEventData
-
-
-class StateEvent(BaseModel):
-    type: Literal["state"] = "state"
-    data: InfraState
-
-
-class IncidentEvent(BaseModel):
-    type: Literal["incident"] = "incident"
-    data: Incident

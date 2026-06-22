@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: callsign
+Version: 0.1.0
+Summary: Python client SDK for the CallSign human-in-the-loop approval gate
+Requires-Python: >=3.9
+Requires-Dist: httpx>=0.24
+Provides-Extra: dev
+Requires-Dist: pytest>=7; extra == "dev"
